@@ -1,0 +1,42 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260903173527
+Username: Chris-consystec\Chris
+RunAs User: Chris-consystec\Chris
+Configuration Name: 
+Machine: CHRIS-CONSYSTEC (Microsoft Windows NT 10.0.26200.0)
+Host Application: powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Users\Chris\OneDrive\Desktop\Projects\Consystec Project Spreadsheet Improvement\quickbooks sync agent - new\Sync QuickBooks Hours.ps1
+Process ID: 11460
+PSVersion: 5.1.26100.9168
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.9168
+BuildVersion: 10.0.26100.9168
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+====================================================
+ ConSysTec QuickBooks Sync
+====================================================
+
+Starting the connection to QuickBooks...
+
+2026-09-03T21:35:28.524Z QBWC agent v1.3 listening on http://localhost:8090/ - register this URL in connector.qwc
+2026-09-03T21:35:28.528Z Will push to: https://script.google.com/macros/s/AKfycbzjYKhai8yyCYq8JbNPGS_crPqXvvbqJGewm-SKxPRehiWt_qtmrG1vDcaUJt9oyab4ww/exec
+2026-09-03T21:35:28.529Z (That comes from $env:APPS_SCRIPT_URL - editing this file does not set it.)
+
+====================================================
+ Now do these two things:
+====================================================
+ 1. In QuickBooks Web Connector, check the box for
+    'ConSysTec Hours Sync' and click 'Update Now'.
+
+ 2. In the Google Sheet, click the QuickBooks menu,
+    then click 'Refresh Hours'.
+====================================================
+
+The agent is logging to:
+    C:\Users\Chris\OneDrive\Desktop\Projects\Consystec Project Spreadsheet Improvement\quickbooks sync agent - new\agent-output.txt
+Open that file any time to see what happened on the last sync.
+

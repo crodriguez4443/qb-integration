@@ -1,0 +1,3 @@
+2026-09-03T21:35:28.524Z QBWC agent v1.3 listening on http://localhost:8090/ - register this URL in connector.qwc
+2026-09-03T21:35:28.528Z Will push to: https://script.google.com/macros/s/AKfycbzjYKhai8yyCYq8JbNPGS_crPqXvvbqJGewm-SKxPRehiWt_qtmrG1vDcaUJt9oyab4ww/exec
+2026-09-03T21:35:28.529Z (That comes from $env:APPS_SCRIPT_URL - editing this file does not set it.)
