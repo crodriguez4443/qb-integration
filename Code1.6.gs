@@ -81,29 +81,51 @@ var QBD_CUSTOMER_PROJECT_COL = 4;
 var SOURCE_HEADER_ROW = 2;
 var COL_PROJECT = 1;   // A
 var COL_PERSON = 2;    // B - full QuickBooks DisplayName, e.g. "Chan, Patrick"
-var COL_HOURS_ROLLUP = 52;    // AN - only populated on a project's first row
-var COL_FUNDS_REMAINING = 55; // AQ
-var COL_AS_OF = 57;           // AS
-var COL_TYPE = 58;            // AT - CPFF / Fixed Fee / Time & Materials / ...
-var COL_CONTRACT_VALUE = 59;  // AU
-var COL_RATE = 60;            // AV - $/hour, per person per project
+// Shifted right by 24 columns (from 52/55/57/58/59/60) when GRID_YEARS went
+// 4 -> 6: the grid now runs C..BV (72 columns) instead of C..AX (48), so
+// everything after it had to move to stay clear. The 24 columns have been
+// inserted ahead of these in the live "test_current" sheet to match.
+var COL_HOURS_ROLLUP = 76;    // BX - only populated on a project's first row
+var COL_FUNDS_REMAINING = 79; // CA
+var COL_AS_OF = 81;           // CC
+var COL_TYPE = 82;            // CD - CPFF / Fixed Fee / Time & Materials / ...
+var COL_CONTRACT_VALUE = 83;  // CE
+var COL_RATE = 84;            // CF - $/hour, per person per project
 
 // How far right readCurrentLayout_ has to read. Rate is the last column it
 // needs, but naming it separately keeps the range obvious if columns move.
 var SOURCE_LAST_COL = COL_RATE;
 
-// The month grid: 36 columns starting at C, three calendar years wide, because
-// the headers are CONCAT formulas running A1-2 .. A1.
+// The month grid: 72 columns starting at C, six calendar years wide, because
+// the headers are CONCAT formulas running A1-5 .. A1. Raised from 4 to match
+// server1.3.js's YEARS_BACK=5 (see the YEARS_BACK doc comment there) - the
+// agent's pull floor and the grid's display floor must agree, or entries the
+// agent pulls land as "unplaced" in the Refresh Hours alert instead of on the
+// sheet. The live sheet's header formulas have been extended to cover the
+// new columns, and the columns after the grid (COL_HOURS_ROLLUP onward,
+// already shifted above) physically inserted to match.
 var COL_MONTH_FIRST = 3;   // C
-var GRID_YEARS = 4;
+var GRID_YEARS = 6;
 
-// Google Sheets palette, matching the convention already used in the sheet:
-// light magenta 3 where every hour in the cell has been invoiced, light
-// magenta 2 where billed hours sit alongside unbilled or non-billable ones.
-// Lower case - getBackgrounds() returns lower-case hex, and these are compared
-// against it directly.
-var FILL_BILLED_ONLY = '#ead1dc';  // light magenta 3
-var FILL_MIXED = '#d5a6bd';        // light magenta 2
+// How billed each cell is is marked with font weight/color, not fill:
+// bold, default color where every hour has been invoiced; bold, #cc33b3
+// where billed hours sit alongside unbilled or non-billable ones; plain
+// (not bold), #cc33b3 where none of the cell's hours have been billed yet.
+var STYLE_BILLED_ONLY = { weight: 'bold', color: '#000000' };
+var STYLE_MIXED = { weight: 'bold', color: '#cc33b3' };
+var STYLE_UNBILLED = { weight: 'normal', color: '#cc33b3' };
+var STYLE_RESET = { weight: 'normal', color: '#000000' }; // no hours at all
+
+function styleKey_(weight, color) {
+  return String(weight) + '|' + String(color || '').toLowerCase();
+}
+
+// Every (weight, color) pair this script writes, as "weight|color" keys. A
+// cell wearing one of these got it from a previous run rather than from the
+// sheet's own formatting, so writeGrid_ may overwrite it when a cell that
+// used to have hours no longer does - any other styling is left alone.
+var MARKER_STYLES = [STYLE_BILLED_ONLY, STYLE_MIXED, STYLE_UNBILLED].map(
+  function (s) { return styleKey_(s.weight, s.color); });
 
 // A month inside the sync window with no hours: write nothing (true) or a
 // literal 0 (false). The sheet currently holds explicit zeros from an earlier
@@ -112,7 +134,7 @@ var FILL_MIXED = '#d5a6bd';        // light magenta 2
 // touched at all - see writeGrid_.
 var BLANK_WHEN_ZERO = true;
 
-// MUST match MAX_RETURNED.TimeTracking in tools/qbwc-agent/server1.2.js.
+// MUST match MAX_RETURNED.TimeTracking in tools/qbwc-agent/server1.3.js.
 //
 // qbXML is not paginated: it returns at most MaxReturned rows and offers no
 // "there were more" flag, so a query that hit the cap looks exactly like one
@@ -121,7 +143,7 @@ var BLANK_WHEN_ZERO = true;
 // be silently short are the ones whose whole job is to be trusted for billing.
 // So the check is repeated here, where the rows are actually read, and the
 // result goes in the alert where someone will see it.
-var QBD_TIME_ROW_CAP = 40000;
+var QBD_TIME_ROW_CAP = 50000;
 
 // ---------------------------------------------------------------------------
 // Menu
@@ -456,7 +478,7 @@ function doPost(e) {
     // exception into its own generic HTML error page, which would put us
     // right back to being unable to tell "Google rejected this" apart from
     // "our code failed." A 200 with a JSON body guarantees the agent's
-    // `text` actually contains this message, and server1.2.js treats
+    // `text` actually contains this message, and server1.3.js treats
     // success:false as a failure rather than just logging it.
     var body = {
       success: false,
@@ -1022,6 +1044,23 @@ function refreshHours() {
     return;
   }
 
+  // writeGrid_ below writes columns COL_MONTH_FIRST..COL_MONTH_FIRST+72-1
+  // and readCurrentLayout_ reads through SOURCE_LAST_COL (COL_RATE) - both
+  // assume the hand-maintained Hours Rollup / Funds Remaining / As Of / Type
+  // / Contract Value / Rate columns sit at their expected positions. If a
+  // future GRID_YEARS change (or any other reshuffle) ever outruns the live
+  // sheet again, the grid write would land on top of those columns instead
+  // of the intended blank ones. Bail rather than risk that.
+  if (sheet.getLastColumn() < SOURCE_LAST_COL) {
+    ui.alert('"' + SOURCE_SHEET + '" only has ' + sheet.getLastColumn() + ' columns, but ' +
+      'this script expects data through column ' + SOURCE_LAST_COL + ' (GRID_YEARS = ' +
+      GRID_YEARS + '). Stopping before writing anything.\n\n' +
+      'The live sheet\'s columns no longer match what this script expects - check that ' +
+      'COL_HOURS_ROLLUP, COL_FUNDS_REMAINING, COL_AS_OF, COL_TYPE, COL_CONTRACT_VALUE, and ' +
+      'COL_RATE still point at the right columns before running this again.');
+    return;
+  }
+
   // ---- aggregate -------------------------------------------------------
   // byCell["<row>|||<yyyy-MM>"] = { total, billed } for rows on this sheet.
   var byCell = {};
@@ -1102,7 +1141,7 @@ function refreshHours() {
   if (dataSince && dataSince.slice(0, 7) > grid.months[0]) {
     msg += 'The grid starts at ' + monthLabel_(grid.months[0]) + ', earlier than any data ' +
       'received. Those columns are left untouched rather than zeroed - raise YEARS_BACK ' +
-      'in server1.2.js and sync again to fill them.\n';
+      'in server1.3.js and sync again to fill them.\n';
   }
   if (dataUntil && dataUntil.slice(0, 7) < grid.lastWritable) {
     msg += 'No data yet for ' + monthLabel_(grid.lastWritable) + ', the last complete ' +
@@ -1134,8 +1173,8 @@ function refreshHours() {
  * The month grid on "test_current": which spreadsheet column holds which month,
  * and how far right it is legitimate to write.
  *
- * The headers are CONCAT formulas off A1, so the grid always spans three
- * calendar years - A1-2, A1-1, A1 - as 36 columns starting at C. Reading A1
+ * The headers are CONCAT formulas off A1, so the grid always spans six
+ * calendar years - A1-5 .. A1 - as 72 columns starting at C. Reading A1
  * rather than the header text means a changed reporting year moves the grid
  * here automatically, and it avoids depending on how Sheets renders a formula.
  *
@@ -1179,10 +1218,11 @@ function gridMonths_(sheet) {
  * and written back exactly as found, so a refresh cannot quietly erase planning
  * data or assert a zero for a month nobody has pulled yet.
  *
- * Colours follow the convention already in the sheet:
- *   every hour billed        -> light magenta 3 (#EAD1DC)
- *   billed plus anything else -> light magenta 2 (#D5A6BD)
- *   nothing billed            -> the row's own base fill, restored
+ * Billed status is marked with font weight/color, not fill:
+ *   every hour billed         -> bold
+ *   billed plus anything else -> bold, #cc33b3
+ *   nothing billed            -> #cc33b3
+ *   no hours at all           -> reset to normal weight, default color
  */
 function writeGrid_(sheet, layout, grid, byCell, dataSince, dataUntil) {
   var firstCol = COL_MONTH_FIRST;
@@ -1199,7 +1239,8 @@ function writeGrid_(sheet, layout, grid, byCell, dataSince, dataUntil) {
 
   var range = sheet.getRange(firstRow, firstCol, nRows, nCols);
   var values = range.getValues();
-  var backgrounds = range.getBackgrounds();
+  var fontWeights = range.getFontWeights();
+  var fontColors = range.getFontColors();
 
   // Only months QuickBooks actually reported on are touched. Outside that
   // range "no data pulled" and "zero hours worked" are indistinguishable here,
@@ -1214,20 +1255,6 @@ function writeGrid_(sheet, layout, grid, byCell, dataSince, dataUntil) {
   layout.forEach(function (p) {
     p.people.forEach(function (person) { isPersonRow[person.row] = true; });
   });
-
-  // Each row's base fill = the colour it uses outside the billed markers, so a
-  // cell that stops being billed goes back to looking like its neighbours
-  // instead of keeping a stale magenta.
-  function baseFillFor(rowIdx) {
-    var tally = {}, best = '', bestN = 0;
-    for (var c = 0; c < nCols; c++) {
-      var bg = String(backgrounds[rowIdx][c] || '').toLowerCase();
-      if (bg === FILL_BILLED_ONLY || bg === FILL_MIXED) continue;
-      tally[bg] = (tally[bg] || 0) + 1;
-      if (tally[bg] > bestN) { bestN = tally[bg]; best = bg; }
-    }
-    return best || '#ffffff';
-  }
 
   var hours = 0, cells = 0, billedOnly = 0, mixed = 0;
   var firstWritten = '', lastWritten = '';
@@ -1252,27 +1279,36 @@ function writeGrid_(sheet, layout, grid, byCell, dataSince, dataUntil) {
       values[r][c] = total ? total : (BLANK_WHEN_ZERO ? '' : 0);
       if (total) { hours += total; cells++; }
 
-      if (billed > 0.005) {
-        if (Math.abs(billed - (agg ? agg.total : 0)) < 0.005) {
-          backgrounds[r][c] = FILL_BILLED_ONLY;
-          billedOnly++;
-        } else {
-          backgrounds[r][c] = FILL_MIXED;
-          mixed++;
+      // Keyed off total, not off what was written: a cell with no hours is not
+      // a billing state at all, so it keeps whatever styling it already had
+      // whether BLANK_WHEN_ZERO leaves it empty or writes a literal 0.
+      if (!total) {
+        var key = styleKey_(fontWeights[r][c], fontColors[r][c]);
+        if (MARKER_STYLES.indexOf(key) >= 0) {
+          // stale marker from a previous run - reset rather than leave it
+          fontWeights[r][c] = STYLE_RESET.weight;
+          fontColors[r][c] = STYLE_RESET.color;
         }
+      } else if (billed < 0.005) {
+        fontWeights[r][c] = STYLE_UNBILLED.weight;
+        fontColors[r][c] = STYLE_UNBILLED.color;
+      } else if (Math.abs(billed - agg.total) < 0.005) {
+        fontWeights[r][c] = STYLE_BILLED_ONLY.weight;
+        fontColors[r][c] = STYLE_BILLED_ONLY.color;
+        billedOnly++;
       } else {
-        var bg = String(backgrounds[r][c] || '').toLowerCase();
-        if (bg === FILL_BILLED_ONLY || bg === FILL_MIXED) {
-          backgrounds[r][c] = baseFillFor(r); // stale marker from a previous run
-        }
+        fontWeights[r][c] = STYLE_MIXED.weight;
+        fontColors[r][c] = STYLE_MIXED.color;
+        mixed++;
       }
     }
   });
 
-  // Two writes for the whole grid rather than one per cell - Apps Script charges
-  // per call, and a per-cell loop here would take minutes.
+  // Three writes for the whole grid rather than one per cell - Apps Script
+  // charges per call, and a per-cell loop here would take minutes.
   range.setValues(values);
-  range.setBackgrounds(backgrounds);
+  range.setFontWeights(fontWeights);
+  range.setFontColors(fontColors);
 
   return {
     hours: hours,

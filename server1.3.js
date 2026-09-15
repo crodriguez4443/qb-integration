@@ -19,15 +19,25 @@
  *   QBD_PUSH_SECRET   - must match QBD_PUSH_SECRET in Save Credentials (required)
  *   QBWC_PORT         - local port to listen on (default 8090)
  *   YEARS_BACK        - how many whole calendar years of TimeTracking to pull
- *                       (default 3). The floor is 1 January of (this year -
+ *                       (default 5). The floor is 1 January of (this year -
  *                       YEARS_BACK): run in 2026 with the default, that is
- *                       2023-01-01. Nothing normally needs to set this - it is
+ *                       2021-01-01. Nothing normally needs to set this - it is
  *                       an env var only so the window can be widened for a
- *                       one-off backfill. Keep it wide enough that 1 January of
- *                       (this year - YEARS_BACK) is on or before the Sheet's
- *                       "Set Months Of History" reach, since every push fully
- *                       replaces QBD Time; and not so wide that the row count
- *                       exceeds MAX_RETURNED.TimeTracking below, which qbXML
+ *                       one-off backfill. Keep it equal to GRID_YEARS - 1 in
+ *                       Code1.6.gs (currently 6, so 5, matching this default):
+ *                       the month grid only displays/totals that many years
+ *                       back FROM THE SHEET'S OWN A1 (the reporting year,
+ *                       hand-edited), not from today - unlike this agent's
+ *                       floor, which moves on its own every January. If A1
+ *                       ever drifts behind the real year, the two floors
+ *                       drift apart even with the numbers matching here.
+ *                       Anything wider than the grid lands as "unplaced"
+ *                       hours in the Refresh Hours alert instead of on the
+ *                       sheet. GRID_YEARS was raised to 6 alongside this
+ *                       default, and the live "test_current" sheet's header
+ *                       formulas and post-grid columns have been widened to
+ *                       match. Also not so wide that the row count exceeds
+ *                       MAX_RETURNED.TimeTracking below, which qbXML
  *                       truncates silently - see that constant)
  *   QBXML_VERSION     - qbXML schema version to request (default "13.0";
  *                       first real run may need to bump this to match the
@@ -52,7 +62,7 @@ const AGENT_VERSION = '1.3';
 const PORT = Number(process.env.QBWC_PORT || 8090);
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
 const PUSH_SECRET = process.env.QBD_PUSH_SECRET;
-const YEARS_BACK = Number(process.env.YEARS_BACK || 3);
+const YEARS_BACK = Number(process.env.YEARS_BACK || 5);
 const QBXML_VERSION = process.env.QBXML_VERSION || '13.0';
 
 if (!APPS_SCRIPT_URL || !PUSH_SECRET) {
@@ -85,7 +95,7 @@ function banner_(title, lines) {
 
 function fromDate_() {
   // First day of the calendar year YEARS_BACK years ago - run in 2026 with the
-  // default 3, this is "2023-01-01". Anchoring to a year boundary rather than a
+  // default 5, this is "2021-01-01". Anchoring to a year boundary rather than a
   // rolling month count means the agent always pulls whole calendar years, so
   // the Sheet can always show a complete oldest year, and the floor only steps
   // (forward one year) each January instead of drifting every month. Built as a
@@ -113,18 +123,18 @@ const REQUEST_STEPS = ['Customer', 'Employee', 'Vendor', 'TimeTracking'];
 //
 // TimeTracking was 10000, which at ConSysTec's measured rate of ~530 entries a
 // month is only ~19 months of headroom. That was fine while this data only fed
-// a 12-month grid, but the Sheet's "Hours Billed"/"Hours Unbilled" tabs total
-// project-to-date, so the window now wants to be years wide and the cap became
-// the binding constraint. YEARS_BACK=3 reaches ~3.7 years back (to 1 Jan three
-// years ago, plus this year to date) - roughly 24000 entries, so 40000 leaves
-// real room. Keep QBD_TIME_ROW_CAP in Code1.4.gs equal to this number: the
-// Sheet re-checks it at read time and warns in the Refresh Hours alert, because
-// a console warning nobody reads is not a safeguard.
+// a 12-month grid, but the Sheet's month grid now totals multiple years, so
+// the window wants to be years wide and the cap became the binding constraint.
+// YEARS_BACK=5 reaches ~5.7 years back (to 1 Jan five years ago, plus this
+// year to date) - roughly 36000 entries, so 50000 leaves real room (~8 years
+// is the new ceiling). Keep QBD_TIME_ROW_CAP in Code1.6.gs equal to this
+// number: the Sheet re-checks it at read time and warns in the Refresh Hours
+// alert, because a console warning nobody reads is not a safeguard.
 const MAX_RETURNED = {
   Customer: 1000,
   Employee: 1000,
   Vendor: 1000,
-  TimeTracking: 40000
+  TimeTracking: 50000
 };
 
 function buildRequest_(step) {

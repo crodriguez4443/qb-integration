@@ -322,21 +322,22 @@ the report is always complete. Override it with an explicit month count under
 
 ## Keep the agent's window wide enough
 
-The sync agent pulls **3 whole calendar years** — from 1 January of three
-years ago — automatically (`YEARS_BACK` in `server1.3.js`, default `3`). That
-is one full year more than the Sheet's default display window, so there is
-always a year of headroom behind what `Hours Actual` shows. Every push fully
-replaces the `QBD Time` sheet, so if you widen the Sheet's window past what
-the agent pulled (with **Set Months Of History**), the oldest months would
-silently come back empty — an unattended sync that silently drops hours is
-worse than no sync at all. Widen `YEARS_BACK` first, then the Sheet.
+The sync agent pulls **5 whole calendar years** — from 1 January of five
+years ago — automatically (`YEARS_BACK` in `server1.3.js`, default `5`),
+matching `GRID_YEARS - 1` (`Code1.6.gs`, `GRID_YEARS = 6`). The live
+`test_current` sheet has been widened to match — the 24 extra columns
+inserted and the header formulas extended — so the grid actually reaches 5
+years back. Every push still fully replaces the `QBD Time` sheet, so if the
+Sheet's grid is ever widened past what the agent pulled, the oldest months
+would silently come back empty — an unattended sync that silently drops
+hours is worse than no sync at all. Widen `YEARS_BACK` first, then the grid.
 
 ### …but not wider than the row cap
 
-Since `Hours Billed` / `Hours Unbilled` answer a *project-to-date* question,
-this window bounds more than the month grid: a project that started before the
-agent's floor shows a billed total that is simply short. The obvious move is
-to set it very wide — and that is a trap.
+qbXML is **not paginated**, so entries older than the grid still count
+against the row cap below even though `refreshHours()` excludes them from
+`test_current` — reported instead as "unplaced" in the Refresh Hours alert.
+The obvious move is to set the window very wide — and that is a trap.
 
 qbXML is **not paginated**. It returns at most `MAX_RETURNED.TimeTracking`
 rows (`server1.3.js`) and gives no indication whatsoever that it truncated.
@@ -345,12 +346,12 @@ was only ~19 months of headroom. Both numbers have been raised together:
 
 | Setting                       | Where                        | Value   |
 | ----------------------------- | ---------------------------- | ------- |
-| `YEARS_BACK`                  | `server1.3.js`               | `3`     |
-| `MAX_RETURNED.TimeTracking`   | `server1.3.js`               | `40000` |
-| `QBD_TIME_ROW_CAP`            | `Code1.4.gs`                 | `40000` |
+| `YEARS_BACK`                  | `server1.3.js`               | `5`     |
+| `MAX_RETURNED.TimeTracking`   | `server1.3.js`               | `50000` |
+| `QBD_TIME_ROW_CAP`            | `Code1.6.gs`                 | `50000` |
 
-`YEARS_BACK = 3` reaches ~3.7 years back (to 1 Jan three years ago, plus this
-year to date) ≈ 24000 entries, comfortably inside 40000 — roughly 6 years is
+`YEARS_BACK = 5` reaches ~5.7 years back (to 1 Jan five years ago, plus this
+year to date) ≈ 36000 entries, comfortably inside 50000 — roughly 8 years is
 the ceiling. **Never raise `YEARS_BACK` without checking it still fits**, and
 keep the last two numbers equal — the Sheet re-checks the row count at read
 time and puts a warning at the top of the Refresh Hours alert if it comes back

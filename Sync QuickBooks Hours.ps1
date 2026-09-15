@@ -67,12 +67,12 @@ $env:APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzjYKhai8yyCYq8J
 $env:QBD_PUSH_SECRET = "abc123"
 
 # How far back to pull time entries is now baked into server1.3.js: it pulls
-# 3 whole calendar years (from 1 January of three years ago) automatically,
+# 5 whole calendar years (from 1 January of five years ago) automatically,
 # with no env var needed. Only override this for a one-off backfill, and only
 # after checking the row count still fits under MAX_RETURNED.TimeTracking
-# (40000 in server1.3.js) - qbXML gives NO indication when it truncates, and
-# ConSysTec logs roughly 530 time entries a month, so ~6 years is the ceiling.
-#   $env:YEARS_BACK = "3"
+# (50000 in server1.3.js) - qbXML gives NO indication when it truncates, and
+# ConSysTec logs roughly 530 time entries a month, so ~8 years is the ceiling.
+#   $env:YEARS_BACK = "5"
 
 # --- Clear out a previous agent that is still running on the port ---------
 # If a previous run's window was closed with the X instead of pressing Enter,

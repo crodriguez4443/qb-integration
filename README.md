@@ -5,12 +5,12 @@ This project has four moving parts, split across two machines: the cloud
 what each file does and where it lives. For the step-by-step install, see
 [SETUP.md](SETUP.md), right alongside this file.
 
-This README and SETUP.md both live in `tools/qbwc-agent/QuickBooks Sync
-Agent/` — next to the three files that actually run (`server1.3.js`,
-`connector.qwc`, `Sync QuickBooks Hours.ps1`) — so the whole integration can
-be understood from one folder. `Code1.3.gs` is the one exception: it has to
-live in the project root (two folders up), since that's where the rest of
-the Google Sheet project lives.
+This README and SETUP.md live in the same folder as every file the
+integration uses — the three that actually run (`server1.3.js`,
+`connector.qwc`, `Sync QuickBooks Hours.ps1`), plus `Code1.6.gs`, the source
+copy of the Apps Script — so the whole thing can be understood from one
+folder. `Code1.6.gs` is not run locally; it's the copy you paste into the
+Google Sheet's Apps Script editor.
 
 ```
 QuickBooks Desktop  <--(same machine)-->  QuickBooks Web Connector
@@ -21,51 +21,82 @@ QuickBooks Desktop  <--(same machine)-->  QuickBooks Web Connector
                                   tools/qbwc-agent/.../server1.3.js  (Node)
                                                   |  HTTPS POST
                                                   v
-                                       Code1.3.gs  (Google Apps Script,
+                                       Code1.6.gs  (Google Apps Script,
                                        lives inside the Google Sheet)
 ```
 
-## `Code1.3.gs` — the Sheet's brain
+## `Code1.6.gs` — the Sheet's brain
 
 **Lives in:** the Google Sheet itself, under **Extensions → Apps Script**
-(pasted in as that project's `Code.gs`); the source copy, `Code1.3.gs`, sits
-in the project root (two folders up from this README). It is not a file you
-run locally — Google hosts and runs it.
+(pasted in as that project's `Code.gs`); the source copy, `Code1.6.gs`, sits
+in this folder alongside this README. It is not a file you run locally —
+Google hosts and runs it.
+
+**What changed since the docs' last big revision:** the two mapping tabs
+(`Map Projects`, `Map People`) are gone. `test_current` column B now holds
+the full QuickBooks DisplayName ("Chan, Patrick"), so it joins straight to
+`QBD People` column B; and `QBD Customers` column D tags each customer with
+the project it rolls up to, matching the project names in `test_current`
+column A. Both joins are now exact text — no fuzzy guessing, nothing to
+rebuild. A customer with a blank column D is simply skipped (its hours are
+reported as untagged, never silently lost). The QuickBooks Online code path
+is also fully removed — Desktop only — with the last dual-mode version kept
+in `archive/`.
 
 This is the only piece with a user interface — everything in the Sheet's
 **QuickBooks** menu is a function in this file:
 
 - **Refresh Hours** — reads the `QBD Time` sheet (see below), matches each
-  entry to a project/person on `Current` using the mapping tabs, and rewrites
-  `Hours Actual`.
-- **Rebuild Mapping Tabs** — refreshes `Map Projects` / `Map People`,
-  guessing the obvious name matches and highlighting the rest for a manual
-  pick.
+  entry to a project/person on `test_current`, and writes the hours straight
+  into that tab's month grid. There is no separate report tab: the numbers
+  land in the grid itself, and font weight/color mark how much of each cell
+  QuickBooks has already billed (bold = every hour billed; bold, `#cc33b3` =
+  billed hours mixed with unbilled or non-billable; plain `#cc33b3` = nothing
+  billed yet). Months outside the synced window, spacer rows, and the
+  hand-maintained forward-estimate columns are read and written back
+  untouched. The run ends in an alert summarising what landed and what
+  didn't.
+- **Check Project Tags** — read-only health check, replacing the old
+  "Rebuild Mapping Tabs". Reports which `test_current` project blocks have no
+  matching customer tag, which customers carry no tag in `QBD Customers`
+  column D, and any person on `test_current` who matches no `QBD People`
+  name.
 - **Test Connection** / **Show Sample Time Entries** — diagnostics.
 - **Setup → Save Credentials** — stores `QBD_PUSH_SECRET` as a script
-  property, so it can be checked against every push.
-- **Setup → Set Months Of History** — how far back Refresh Hours looks.
+  property (checked against every push), and records the spreadsheet's ID as
+  `QBD_SPREADSHEET_ID` so `doPost`/`doGet` can still find the sheet when
+  `SpreadsheetApp.getActive()` can't.
+
+(There is no longer a "Set Months Of History" item — how far back the report
+reaches is set entirely by the agent's `YEARS_BACK`, below.)
 
 It also has to be **deployed as a Web App** (Deploy → New deployment) so it
 has a public `/exec` URL — that's the endpoint `server1.3.js` posts to.
 `doPost()` is the receiving end: it checks the posted `secret` against the
 saved `QBD_PUSH_SECRET`, and if it matches, writes the incoming
 customers/people/time entries into three raw staging sheets (`QBD
-Customers`, `QBD People`, `QBD Time`). Nothing from QuickBooks lands directly
-on `Hours Actual` — that only happens when someone clicks **Refresh Hours**,
+Customers`, `QBD People`, `QBD Time`). Column D of `QBD Customers` — the
+hand-maintained project tag — is read back and rewritten on every push, so a
+sync never erases it. Nothing from QuickBooks lands on the `test_current`
+grid directly; that only happens when someone clicks **Refresh Hours**,
 which reads those staging sheets.
 
-`SCRIPT_VERSION` (currently `'1.3'`) is echoed back in every response
+`doGet()` returns the deployed `SCRIPT_VERSION` plus a few diagnostics as
+JSON: open the `/exec` URL in any browser to confirm which version is
+actually live, whether a secret is saved, and whether the script can reach
+the spreadsheet — no QuickBooks or agent needed.
+
+`SCRIPT_VERSION` (currently `'3.0'`) is echoed back in every response
 specifically so "is the deployed Web App actually running this version?" is
 answerable from outside the Apps Script editor — pasting new code in and
 saving does **not** update what the live `/exec` URL serves; that requires a
 new deployment (or updating the existing one) each time this file changes.
 
-> Note: the project root also has `Code.gs`, `Code1.1.gs`, and `Code1.2.gs`.
-> Despite the plain name, `Code.gs` is the *oldest* of the four — it predates
-> `SCRIPT_VERSION` entirely and is missing fixes present by 1.3. `Code1.3.gs`
-> is the one actually pasted into Apps Script. Ignore the older three unless
-> diffing history.
+> Note: `archive/` at the project root holds the older cuts — `Code.gs` (the
+> oldest; predates `SCRIPT_VERSION` entirely) through `Code1.4.gs`, plus the
+> dual Online/Desktop version. All are missing fixes present by `Code1.6.gs`,
+> the mapping-tab removal among them. `Code1.6.gs` in this folder is the one
+> actually pasted into Apps Script. Ignore the rest unless diffing history.
 >
 > The deployed Web App URL and the `QBD_PUSH_SECRET` it checks are set up in
 > [SETUP.md](SETUP.md) Steps 2–3 — including why the deployment's **Execute
@@ -97,20 +128,46 @@ only way to do that at all — QuickBooks Desktop has no REST API. It runs a
 small local SOAP server that QBWC calls into on its own schedule (or on
 **Update Now**). Each session it: pulls Customers, Employees, Vendors, and
 TimeActivity entries via qbXML, then does one outbound HTTPS POST of all of
-it, plus the shared `secret`, to `Code1.3.gs`'s `/exec` URL.
+it, plus the shared `secret`, to `Code1.6.gs`'s `/exec` URL.
+
+The TimeTracking pull is date-bounded to whole calendar years: `YEARS_BACK`
+(default 5) means "from 1 January of five years ago." qbXML is not
+paginated and gives no signal when it truncates, so the agent caps
+TimeTracking at `MAX_RETURNED.TimeTracking` (50000 rows, ~8 years at
+ConSysTec's measured rate) and prints a loud banner whenever a query comes
+back *exactly* full — the only available evidence that rows were dropped.
+Keep `QBD_TIME_ROW_CAP` in `Code1.6.gs` equal to that number; the Sheet
+re-checks it at read time.
+
+`GRID_YEARS` in `Code1.6.gs` is `6`, so `GRID_YEARS - 1` (`5`) matches the
+agent's pull depth, and the six fixed columns after the grid
+(`COL_HOURS_ROLLUP` → col 76, `COL_FUNDS_REMAINING` → 79, `COL_AS_OF` → 81,
+`COL_TYPE` → 82, `COL_CONTRACT_VALUE` → 83, `COL_RATE` → 84) have been
+shifted right by 24 columns in the code to match. Those 24 columns have
+already been inserted into the live `test_current` sheet, its header
+formulas extended to match, and the old per-cell background fill (from
+before billed status moved to bold/font-color styling — see above) cleared
+by hand.
+
+Most of what this agent does after the POST is scrutinise the reply. A
+broken Apps Script deployment answers HTTP 200 with an HTML error page or a
+Google login page, so the status code alone cannot tell success from total
+failure — the agent classifies the response body and prints an unmissable
+banner, with the specific fix, for each failure mode, rather than letting a
+"200" scroll past as if it worked.
 
 Reads its configuration entirely from environment variables — no config
 file — which is why the launcher script below exists: to set those
-variables and start it without the admin ever touching `node` or an
-env var directly. It does nothing on its own; it only reacts when QBWC
-calls it.
+variables (`APPS_SCRIPT_URL`, `QBD_PUSH_SECRET`, and optionally `QBWC_PORT`,
+`YEARS_BACK`, `QBXML_VERSION`) and start it without the admin ever touching
+`node` or an env var directly. It does nothing on its own; it only reacts
+when QBWC calls it.
 
-> Same naming trap as `Code.gs` above: `tools/qbwc-agent/server.js` is the
-> stale original, with `server1.1.js` and `server1.2.js` as intermediate
-> steps. `server1.3.js` is current — its header notes the qbXML side is
-> verified working end to end. v1.3 is a rename of v1.2 with identical
-> code; the version bump exists so the filename, `AGENT_VERSION`, and
-> these docs all agree.
+> Same naming trap as `Code.gs` above: the older `server.js` / `server1.1.js`
+> / `server1.2.js` are stale (kept under `archive/`). `server1.3.js` is
+> current — its header notes the qbXML side is verified working end to end.
+> v1.3 is a rename of v1.2 with identical code; the version bump exists so
+> the filename, `AGENT_VERSION`, and these docs all agree.
 
 ## `Sync QuickBooks Hours.ps1` — the admin-facing launcher
 
@@ -160,4 +217,4 @@ right-click the `.zip` → **Properties** → **Unblock** → **OK**, *before*
 extracting. That clears the tag for everything inside in one step.
 
 It has no logic of its own beyond that — all the real work is in
-`server1.3.js` and `Code1.4.gs`.
+`server1.3.js` and `Code1.6.gs`.
