@@ -149,6 +149,17 @@ formulas extended to match, and the old per-cell background fill (from
 before billed status moved to bold/font-color styling — see above) cleared
 by hand.
 
+v3.1 / agent v1.4: a "Previous years cost rollup" column was inserted at BX
+(col 76), shifting everything after it right by one more
+(`COL_HOURS_ROLLUP` → 77, `COL_FUNDS_REMAINING` → 80, `COL_AS_OF` → 82,
+`COL_TYPE` → 83, `COL_CONTRACT_VALUE` → 84, `COL_RATE` → 85). The agent now
+also pulls every Invoice and CreditMemo (no date bound) into a
+`QBD Invoices` tab, and **Refresh Hours** writes each project's net billed
+dollars dated before 1 January of the A1 year into BX on its first row.
+That comes from invoice amounts, not hours × rate, because rates change
+yearly. Keep `QBD_INVOICE_ROW_CAP` in `Code1.6.gs` equal to
+`MAX_RETURNED.Invoice` (20000).
+
 Most of what this agent does after the POST is scrutinise the reply. A
 broken Apps Script deployment answers HTTP 200 with an HTML error page or a
 Google login page, so the status code alone cannot tell success from total

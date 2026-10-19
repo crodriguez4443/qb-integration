@@ -16,6 +16,11 @@
  * overwritten.
  *
  * ---------------------------------------------------------------------------
+ * v3.1 - Refresh Hours also fills column BX ("Previous years cost rollup") on
+ * each project's first row: net dollars invoiced to that project before
+ * 1 January of the A1 year, from the invoices and credit memos agent v1.4+
+ * pushes into "QBD Invoices". See writePrevYearsBilled_.
+ * ---------------------------------------------------------------------------
  * v2.0 - the two mapping tabs are gone.
  *
  * v1.x kept "Map Projects" and "Map People" because the old "Current" tab held
@@ -55,19 +60,22 @@
 // the editor - a question that cost real time, because Apps Script Web App
 // deployments are pinned to a saved version and editing + Ctrl+S does not
 // change what the /exec URL serves. Bump this whenever this file changes.
-var SCRIPT_VERSION = '3.0';
+var SCRIPT_VERSION = '3.1';
 
 var SOURCE_SHEET = 'test_current';
 
 // This script creates no tabs. Hours are written straight into the month grid
-// on "test_current"; the only other sheets it touches are the three the local
-// agent pushes into, below.
+// on "test_current", and prior-year billed dollars into column BX; the only
+// other sheets it touches are the four the local agent pushes into, below.
 
 // Populated by the local QuickBooks Desktop agent's doPost push; read back
 // out by qbdRead_(). See "QuickBooks Desktop" section below.
 var QBD_CUSTOMERS_SHEET = 'QBD Customers';
 var QBD_PEOPLE_SHEET = 'QBD People';
 var QBD_TIME_SHEET = 'QBD Time';
+// Invoices and credit memos (agent v1.4+). Credit memos are stored with a
+// negative Amount so the column simply sums to net billed.
+var QBD_INVOICES_SHEET = 'QBD Invoices';
 
 // Column D of "QBD Customers": which project each QuickBooks customer rolls up
 // to. Hand-maintained, and the entire basis of the project join - so doPost()
@@ -85,12 +93,16 @@ var COL_PERSON = 2;    // B - full QuickBooks DisplayName, e.g. "Chan, Patrick"
 // 4 -> 6: the grid now runs C..BV (72 columns) instead of C..AX (48), so
 // everything after it had to move to stay clear. The 24 columns have been
 // inserted ahead of these in the live "test_current" sheet to match.
-var COL_HOURS_ROLLUP = 76;    // BX - only populated on a project's first row
-var COL_FUNDS_REMAINING = 79; // CA
-var COL_AS_OF = 81;           // CC
-var COL_TYPE = 82;            // CD - CPFF / Fixed Fee / Time & Materials / ...
-var COL_CONTRACT_VALUE = 83;  // CE
-var COL_RATE = 84;            // CF - $/hour, per person per project
+//
+// Shifted right by 1 more in v3.1, when "Previous years cost rollup" was
+// inserted at BX. Before that shift COL_RATE pointed at Contract Value.
+var COL_PREV_YEARS_BILLED = 76; // BX - written by refreshHours, project's first row only
+var COL_HOURS_ROLLUP = 77;    // BY - only populated on a project's first row
+var COL_FUNDS_REMAINING = 80; // CB
+var COL_AS_OF = 82;           // CD
+var COL_TYPE = 83;            // CE - CPFF / Fixed Fee / Time & Materials / ...
+var COL_CONTRACT_VALUE = 84;  // CF
+var COL_RATE = 85;            // CG - $/hour, per person per project
 
 // How far right readCurrentLayout_ has to read. Rate is the last column it
 // needs, but naming it separately keeps the range obvious if columns move.
@@ -144,6 +156,10 @@ var BLANK_WHEN_ZERO = true;
 // So the check is repeated here, where the rows are actually read, and the
 // result goes in the alert where someone will see it.
 var QBD_TIME_ROW_CAP = 50000;
+
+// MUST match MAX_RETURNED.Invoice in server1.3.js, for the same reason. A
+// short invoice pull understates column BX with no other symptom.
+var QBD_INVOICE_ROW_CAP = 20000;
 
 // ---------------------------------------------------------------------------
 // Menu
@@ -372,7 +388,8 @@ function doGet(e) {
     out.rows = {
       qbdCustomers: dataRows_(found.ss, QBD_CUSTOMERS_SHEET),
       qbdPeople: dataRows_(found.ss, QBD_PEOPLE_SHEET),
-      qbdTime: dataRows_(found.ss, QBD_TIME_SHEET)
+      qbdTime: dataRows_(found.ss, QBD_TIME_SHEET),
+      qbdInvoices: dataRows_(found.ss, QBD_INVOICES_SHEET)
     };
   } catch (err) {
     out.ok = false;
@@ -458,6 +475,19 @@ function doPost(e) {
           t.BillableStatus || '', t.Description || ''];
       }));
 
+    // Only rewritten when the push actually carries invoices. An agent older
+    // than v1.4 sends no "invoices" key at all, and treating that as "zero
+    // invoices" would wipe the tab and zero column BX on the next refresh.
+    var invoices = payload.invoices;
+    if (Array.isArray(invoices)) {
+      writeQbdSheet_(ss, QBD_INVOICES_SHEET,
+        ['Id', 'Type', 'TxnDate', 'RefNumber', 'CustomerId', 'CustomerName', 'Amount'],
+        invoices.map(function (v) {
+          return [v.Id, v.Type || '', v.TxnDate || '', v.RefNumber || '', v.CustomerId || '',
+            v.CustomerName || '', v.Amount != null ? v.Amount : ''];
+        }));
+    }
+
     PropertiesService.getScriptProperties().setProperty('QBD_LAST_PUSH', new Date().toISOString());
 
     return ContentService.createTextOutput(JSON.stringify({
@@ -469,6 +499,7 @@ function doPost(e) {
       projectTagsCarriedOver: carried,
       people: people.length,
       timeEntries: timeEntries.length,
+      invoices: Array.isArray(invoices) ? invoices.length : 'not sent (agent older than v1.4)',
       timestamp: new Date().toISOString()
     })).setMimeType(ContentService.MimeType.JSON);
 
@@ -574,21 +605,37 @@ function qbdRead_(entity) {
       .map(function (r) { return { Id: String(r[0]), DisplayName: String(r[1] || '') }; });
   }
 
+  // A date-looking string in a plain cell gets auto-coerced to a Date by
+  // Sheets on write, so getValues() hands it back as a Date object, not the
+  // "yyyy-MM-dd" string doPost() wrote. Read local date parts (never
+  // Date-to-string formatting) to avoid the UTC month-boundary shift
+  // readCurrentLayout_'s Date guard above is already written to avoid.
+  function ymd_(raw) {
+    return (raw instanceof Date)
+      ? raw.getFullYear() + '-' + pad2_(raw.getMonth() + 1) + '-' + pad2_(raw.getDate())
+      : String(raw || '');
+  }
+
+  if (entity === 'Invoice') {
+    return readRows_(QBD_INVOICES_SHEET).map(function (r) {
+      return {
+        Id: String(r[0]),
+        Type: String(r[1] || ''),
+        TxnDate: ymd_(r[2]),
+        RefNumber: String(r[3] || ''),
+        CustomerId: String(r[4] || ''),
+        CustomerName: String(r[5] || ''),
+        Amount: Number(r[6]) || 0   // credit memos already negative
+      };
+    });
+  }
+
   if (entity === 'TimeActivity') {
     return readRows_(QBD_TIME_SHEET).map(function (r) {
       var personType = String(r[2] || '');
-      // A date-looking string in a plain cell gets auto-coerced to a Date by
-      // Sheets on write, so getValues() hands this back as a Date object, not
-      // the "yyyy-MM-dd" string doPost() wrote. Read local date parts (never
-      // Date-to-string formatting) to avoid the UTC month-boundary shift
-      // readCurrentLayout_'s Date guard above is already written to avoid.
-      var txnDateRaw = r[1];
-      var txnDate = (txnDateRaw instanceof Date)
-        ? txnDateRaw.getFullYear() + '-' + pad2_(txnDateRaw.getMonth() + 1) + '-' + pad2_(txnDateRaw.getDate())
-        : String(txnDateRaw || '');
       var ta = {
         Id: String(r[0]),
-        TxnDate: txnDate,
+        TxnDate: ymd_(r[1]),
         NameOf: personType,
         BillableStatus: String(r[11] || ''),
         Description: String(r[12] || '')
@@ -1056,7 +1103,7 @@ function refreshHours() {
       'this script expects data through column ' + SOURCE_LAST_COL + ' (GRID_YEARS = ' +
       GRID_YEARS + '). Stopping before writing anything.\n\n' +
       'The live sheet\'s columns no longer match what this script expects - check that ' +
-      'COL_HOURS_ROLLUP, COL_FUNDS_REMAINING, COL_AS_OF, COL_TYPE, COL_CONTRACT_VALUE, and ' +
+      'COL_PREV_YEARS_BILLED, COL_HOURS_ROLLUP, COL_FUNDS_REMAINING, COL_AS_OF, COL_TYPE, COL_CONTRACT_VALUE, and ' +
       'COL_RATE still point at the right columns before running this again.');
     return;
   }
@@ -1122,6 +1169,7 @@ function refreshHours() {
   });
 
   var written = writeGrid_(sheet, layout, grid, byCell, dataSince, dataUntil);
+  var prev = writePrevYearsBilled_(sheet, layout, idx, join, grid.year);
 
   // ---- report ----------------------------------------------------------
   var msg = 'Hours refreshed on "' + SOURCE_SHEET + '".\n\n' +
@@ -1131,6 +1179,8 @@ function refreshHours() {
       ? written.firstLabel
       : written.firstLabel + ' through ' + written.lastLabel) + '.\n' +
     written.billedOnly + ' cell(s) fully billed, ' + written.mixed + ' mixed.\n\n';
+
+  msg += prevYearsBilledReport_(prev, grid.year) + '\n';
 
   msg += 'QuickBooks data covers ' +
     (dataSince ? monthLabel_(dataSince.slice(0, 7)) : '(none)') + ' to ' +
@@ -1201,6 +1251,7 @@ function gridMonths_(sheet) {
   var writable = months.filter(function (k) { return k < thisMonth; });
 
   return {
+    year: year,
     months: months,
     colOf: colOf,
     thisMonth: thisMonth,
@@ -1318,6 +1369,129 @@ function writeGrid_(sheet, layout, grid, byCell, dataSince, dataUntil) {
     firstLabel: firstWritten ? monthLabel_(firstWritten) : '(nothing)',
     lastLabel: lastWritten ? monthLabel_(lastWritten) : '(nothing)'
   };
+}
+
+/**
+ * Column BX: the net dollar amount actually invoiced to each project before
+ * 1 January of the reporting year in A1 - i.e. every earlier year combined.
+ *
+ * Summed from QuickBooks invoices (minus credit memos), never from hours x
+ * Rate: rates change every year by uneven amounts, so today's column CG rate
+ * applied to old hours would not reproduce what was really billed. An
+ * invoice counts by its own TxnDate, so December work invoiced in January
+ * falls in the new year - that is when it was billed.
+ *
+ * Projects join exactly as hours do: the invoice's customer -> "QBD
+ * Customers" column D tag -> the block on "test_current". Written to each
+ * project's first row only. A cell there holding a formula is left alone and
+ * reported, rather than overwritten.
+ */
+function writePrevYearsBilled_(sheet, layout, idx, join, year) {
+  var out = {
+    skipped: false, invoices: 0, total: 0, projects: 0, since: '',
+    untagged: 0, untaggedByParent: {}, noBlock: 0, noDate: 0, formulaCells: [],
+    capped: false
+  };
+
+  var invoices = qboQueryAll_('Invoice');
+  // Empty means the agent has never sent invoices (pre-v1.4). Leave BX as it
+  // is rather than write a column of zeros that looks like a real answer.
+  if (!invoices.length) { out.skipped = true; return out; }
+  out.capped = invoices.filter(function (v) { return v.Type === 'Invoice'; }).length >=
+    QBD_INVOICE_ROW_CAP;
+
+  var cutoff = year + '-01-01';
+  var totals = {};
+  invoices.forEach(function (v) {
+    if (!v.TxnDate) { out.noDate += v.Amount; return; }
+    if (v.TxnDate >= cutoff) return;
+    out.invoices++;
+    if (!out.since || v.TxnDate < out.since) out.since = v.TxnDate;
+
+    var project = resolveProject_(idx, v.CustomerId, v.CustomerName);
+    var sheetProject = project ? join.projectNameToSheet[normalize_(project)] : '';
+    if (!project) {
+      // By top-level parent, as checkProjectTags does: invoices are often
+      // raised on a parent job while time sits on its sub-jobs, so the parent
+      // is the thing that needs a tag.
+      var top = String(v.CustomerName || '(no customer)').split(':')[0].trim();
+      out.untaggedByParent[top] = (out.untaggedByParent[top] || 0) + v.Amount;
+      out.untagged += v.Amount;
+      return;
+    }
+    if (!sheetProject) { out.noBlock += v.Amount; return; }
+    totals[sheetProject] = (totals[sheetProject] || 0) + v.Amount;
+  });
+
+  // One read for the whole column, so the formula check costs one call.
+  var headerRows = layout.map(function (p) { return p.headerRow; });
+  var firstRow = Math.min.apply(null, headerRows);
+  var lastRow = Math.max.apply(null, headerRows);
+  var formulas = sheet.getRange(firstRow, COL_PREV_YEARS_BILLED, lastRow - firstRow + 1, 1)
+    .getFormulas();
+
+  // Per-cell writes, not one setValues over the span: the span also covers
+  // every person row in between, and rewriting those would flatten any
+  // formula sitting in them. There are only a few dozen projects.
+  layout.forEach(function (p) {
+    if (formulas[p.headerRow - firstRow][0]) {
+      out.formulaCells.push(colLetter_(COL_PREV_YEARS_BILLED) + p.headerRow + ' (' + p.name + ')');
+      return;
+    }
+    var amount = round2_(totals[p.name] || 0);
+    sheet.getRange(p.headerRow, COL_PREV_YEARS_BILLED).setValue(amount);
+    out.total += amount;
+    if (amount) out.projects++;
+  });
+
+  return out;
+}
+
+function prevYearsBilledReport_(prev, year) {
+  var col = 'Column ' + colLetter_(COL_PREV_YEARS_BILLED);
+  if (prev.skipped) {
+    return col + ' (billed before ' + year + ') NOT updated: "' + QBD_INVOICES_SHEET +
+      '" is empty. The local agent must be v1.4 or later to send invoices - update ' +
+      'server1.3.js, restart it, and sync again.\n';
+  }
+
+  var msg = col + ': ' + money_(prev.total) + ' billed before ' + year + ' across ' +
+    prev.projects + ' project(s), from ' + prev.invoices + ' invoice(s)/credit memo(s)' +
+    (prev.since ? ' dated ' + prev.since + ' onward' : '') + '.\n';
+  if (prev.untagged) {
+    msg += '  ' + money_(prev.untagged) + ' billed to customers with no Project tag in "' +
+      QBD_CUSTOMERS_SHEET + '" column D - not counted. Largest:\n';
+    var byParent = prev.untaggedByParent;
+    var parents = Object.keys(byParent).sort(function (a, b) {
+      return Math.abs(byParent[b]) - Math.abs(byParent[a]);
+    });
+    parents.slice(0, 6).forEach(function (p) {
+      msg += '    - ' + p + ': ' + money_(byParent[p]) + '\n';
+    });
+    if (parents.length > 6) msg += '    - ... and ' + (parents.length - 6) + ' more\n';
+  }
+  if (prev.noBlock) {
+    msg += '  ' + money_(prev.noBlock) + ' billed to tagged projects with no block on "' +
+      SOURCE_SHEET + '" - not counted.\n';
+  }
+  if (prev.noDate) {
+    msg += '  ' + money_(prev.noDate) + ' on invoices with no date - not counted.\n';
+  }
+  if (prev.formulaCells.length) {
+    msg += '  Left alone because they hold a formula: ' + prev.formulaCells.join(', ') + '.\n';
+  }
+  if (prev.capped) {
+    msg += '  WARNING: "' + QBD_INVOICES_SHEET + '" has ' + QBD_INVOICE_ROW_CAP + '+ rows, ' +
+      'the agent\'s MaxReturned cap. QuickBooks may have cut the list short, which would ' +
+      'understate ' + col + '. Raise MAX_RETURNED.Invoice in server1.3.js and ' +
+      'QBD_INVOICE_ROW_CAP here, then sync again.\n';
+  }
+  return msg;
+}
+
+function money_(n) {
+  var s = Math.abs(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return (n < 0 ? '-$' : '$') + s;
 }
 
 function round2_(n) {

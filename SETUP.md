@@ -349,6 +349,8 @@ was only ~19 months of headroom. Both numbers have been raised together:
 | `YEARS_BACK`                  | `server1.3.js`               | `5`     |
 | `MAX_RETURNED.TimeTracking`   | `server1.3.js`               | `50000` |
 | `QBD_TIME_ROW_CAP`            | `Code1.6.gs`                 | `50000` |
+| `MAX_RETURNED.Invoice`        | `server1.3.js`               | `20000` |
+| `QBD_INVOICE_ROW_CAP`         | `Code1.6.gs`                 | `20000` |
 
 `YEARS_BACK = 5` reaches ~5.7 years back (to 1 Jan five years ago, plus this
 year to date) ≈ 36000 entries, comfortably inside 50000 — roughly 8 years is

@@ -51,6 +51,12 @@
  *
  * v1.3 - renamed from server1.2.js; the code is unchanged from v1.2. The
  * launcher and the docs in this folder were updated to match the new name.
+ *
+ * v1.4 - Customer pull now includes inactive customers. Also pulls every Invoice and CreditMemo (all dates, not bounded by
+ * YEARS_BACK) and pushes them as "invoices", for column BX on the Sheet:
+ * dollars actually billed to each project in prior years. Needs Code1.6.gs
+ * v3.1+ deployed; an older doPost ignores the extra key. File name kept as
+ * server1.3.js so the launcher needs no change.
  */
 'use strict';
 
@@ -58,7 +64,7 @@ const http = require('http');
 const crypto = require('crypto');
 const { XMLParser } = require('fast-xml-parser');
 
-const AGENT_VERSION = '1.3';
+const AGENT_VERSION = '1.4';
 const PORT = Number(process.env.QBWC_PORT || 8090);
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
 const PUSH_SECRET = process.env.QBD_PUSH_SECRET;
@@ -113,7 +119,8 @@ function qbxmlEnvelope_(body) {
 
 // Order matters: Employee and Vendor must be pulled before TimeTracking, so
 // the ListID -> type lookup exists by the time TimeTracking rows are parsed.
-const REQUEST_STEPS = ['Customer', 'Employee', 'Vendor', 'TimeTracking'];
+// Invoice and CreditMemo depend on nothing and go last.
+const REQUEST_STEPS = ['Customer', 'Employee', 'Vendor', 'TimeTracking', 'Invoice', 'CreditMemo'];
 
 // These caps are not paginated - qbXML returns at most MaxReturned rows and
 // says nothing about what it dropped. Named here (rather than inlined in the
@@ -131,16 +138,31 @@ const REQUEST_STEPS = ['Customer', 'Employee', 'Vendor', 'TimeTracking'];
 // number: the Sheet re-checks it at read time and warns in the Refresh Hours
 // alert, because a console warning nobody reads is not a safeguard.
 const MAX_RETURNED = {
-  Customer: 1000,
+  // Raised from 1000 in v1.4, since inactive customers now come too.
+  Customer: 5000,
   Employee: 1000,
   Vendor: 1000,
-  TimeTracking: 50000
+  TimeTracking: 50000,
+  // Every invoice ever, since column BX wants all prior years. Keep
+  // QBD_INVOICE_ROW_CAP in Code1.6.gs equal to the Invoice number.
+  Invoice: 20000,
+  CreditMemo: 5000
 };
+
+// Only the fields the Sheet uses. Without this an InvoiceRet carries both
+// addresses, terms, memo, etc., and thousands of them make a needlessly large
+// response for QBWC to hand over.
+const TXN_RET_ELEMENTS = ['TxnID', 'TxnDate', 'RefNumber', 'CustomerRef', 'Subtotal']
+  .map(function (e) { return '<IncludeRetElement>' + e + '</IncludeRetElement>'; }).join('');
 
 function buildRequest_(step) {
   if (step === 'Customer') {
+    // ActiveStatus defaults to ActiveOnly. Finished jobs are usually made
+    // inactive, and their old invoices (column BX) and time could then never
+    // be tagged, because the customer would not exist on "QBD Customers".
+    // Must sit right after MaxReturned - qbXML enforces element order.
     return qbxmlEnvelope_('<CustomerQueryRq requestID="1"><MaxReturned>' +
-      MAX_RETURNED.Customer + '</MaxReturned></CustomerQueryRq>');
+      MAX_RETURNED.Customer + '</MaxReturned><ActiveStatus>All</ActiveStatus></CustomerQueryRq>');
   }
   if (step === 'Employee') {
     return qbxmlEnvelope_('<EmployeeQueryRq requestID="2"><MaxReturned>' +
@@ -160,6 +182,16 @@ function buildRequest_(step) {
       '<MaxReturned>' + MAX_RETURNED.TimeTracking + '</MaxReturned>' +
       '<TxnDateRangeFilter><FromTxnDate>' + fromDate_() + '</FromTxnDate></TxnDateRangeFilter>' +
       '</TimeTrackingQueryRq>');
+  }
+  if (step === 'Invoice' || step === 'CreditMemo') {
+    // Same schema-order rule: MaxReturned first, IncludeRetElement near the
+    // end. No date filter - "all previous years" means all of them.
+    const tag = step + 'QueryRq';
+    return qbxmlEnvelope_(
+      '<' + tag + ' requestID="' + (step === 'Invoice' ? 5 : 6) + '">' +
+      '<MaxReturned>' + MAX_RETURNED[step] + '</MaxReturned>' +
+      TXN_RET_ELEMENTS +
+      '</' + tag + '>');
   }
   throw new Error('unknown step ' + step);
 }
@@ -266,6 +298,24 @@ function parseResponse_(step, xml, session) {
         Minutes: dur.minutes,
         BillableStatus: String(t.BillableStatus || ''),
         Description: String(t.Notes || '')
+      });
+    });
+  } else if (step === 'Invoice' || step === 'CreditMemo') {
+    const rs = msgsRs[step + 'QueryRs'];
+    const rets = asArray_(rs && rs[step + 'Ret']);
+    checkTruncation_(step, rets.length);
+    // Subtotal is the amount billed before sales tax. A credit memo is pushed
+    // negative so the Sheet can simply sum the Amount column to net billed.
+    const sign = step === 'CreditMemo' ? -1 : 1;
+    rets.forEach(function (v) {
+      session.invoices.push({
+        Id: String(v.TxnID),
+        Type: step,
+        TxnDate: String(v.TxnDate || ''),
+        RefNumber: String(v.RefNumber || ''),
+        CustomerId: v.CustomerRef ? String(v.CustomerRef.ListID) : '',
+        CustomerName: v.CustomerRef ? String(v.CustomerRef.FullName || '') : '',
+        Amount: sign * (Number(v.Subtotal) || 0)
       });
     });
   }
@@ -406,7 +456,8 @@ function classifyAppsScriptReply_(status, contentType, text) {
   if (parsed && parsed.success === true) {
     return {
       ok: true,
-      short: 'OK - ' + parsed.timeEntries + ' time entries written to "' +
+      short: 'OK - ' + parsed.timeEntries + ' time entries, ' + parsed.invoices +
+        ' invoices written to "' +
         parsed.spreadsheet + '"' + (parsed.scriptVersion ? ' (Code v' + parsed.scriptVersion + ')' : ''),
       parsed: parsed
     };
@@ -434,11 +485,13 @@ async function pushToAppsScript_(session) {
     secret: PUSH_SECRET,
     customers: session.customers,
     people: session.people,
-    timeEntries: session.timeEntries
+    timeEntries: session.timeEntries,
+    invoices: session.invoices
   });
   const mb = (Buffer.byteLength(body, 'utf8') / 1048576).toFixed(2);
   log('Pushing', session.customers.length, 'customers,', session.people.length,
-    'people,', session.timeEntries.length, 'time entries to Apps Script (' + mb + ' MB JSON)...');
+    'people,', session.timeEntries.length, 'time entries,', session.invoices.length,
+    'invoices/credit memos to Apps Script (' + mb + ' MB JSON)...');
 
   let res;
   let text;
@@ -538,6 +591,7 @@ function newSession_() {
     customers: [],
     people: [],
     timeEntries: [],
+    invoices: [],
     listIdToType: new Map()
   };
 }
