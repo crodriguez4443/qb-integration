@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<QBWCXML>
+  <AppName>ConSysTec Hours Sync</AppName>
+  <AppID></AppID>
+  <AppURL>http://localhost:8090/</AppURL>
+  <AppDescription>Reads Customer/Employee/Vendor/TimeTracking data from QuickBooks Desktop and pushes it to the ConSysTec Project Status sheet. Read-only.</AppDescription>
+  <AppSupport>http://localhost:8090/</AppSupport>
+  <UserName>consystec-sync</UserName>
+  <OwnerID>{9D4ABE75-A63F-48D9-9A42-FEDF788B522D}</OwnerID>
+  <FileID>{36D3936C-1E62-4C74-A6E2-10114006534C}</FileID>
+  <QBType>QBFS</QBType>
+  <IsReadOnly>false</IsReadOnly>
+</QBWCXML>

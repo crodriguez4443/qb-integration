@@ -1,0 +1,10 @@
+{
+  "name": "qbwc-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local QuickBooks Web Connector SOAP agent - pulls Customer/Employee/Vendor/TimeTracking data from QuickBooks Desktop via qbXML and pushes it to the Apps Script Web App.",
+  "main": "server.js",
+  "dependencies": {
+    "fast-xml-parser": "^5.10.1"
+  }
+}
