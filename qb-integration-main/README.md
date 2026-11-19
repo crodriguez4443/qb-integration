@@ -69,8 +69,9 @@ This is the only piece with a user interface — everything in the Sheet's
     total cost to date: everything invoiced (invoices minus credit memos)
     plus hours QuickBooks marks `Billable` but not yet invoiced, through the
     last complete month, priced at each person's Rate. Each BX cell carries
-    a note with its own breakdown, including each QuickBooks customer
-    feeding it (dollars and hours). Two rules decide which invoices count:
+    a short note: amount invoiced and number of invoices, first and last
+    invoice dates, and the amount not yet invoiced. The full breakdown is in
+    **Explain Cost Rollup**. Two rules decide which invoices count:
     - *From when:* the block's **Start Date (column CH)**. Earlier invoices
       on the same customers — last year's contract, a client invoiced
       directly years ago — are left out and listed in the alert. A blank
@@ -116,7 +117,13 @@ saved `QBD_PUSH_SECRET`, and if it matches, writes the incoming
 customers/people/time entries into three raw staging sheets (`QBD
 Customers`, `QBD People`, `QBD Time`). Column D of `QBD Customers` — the
 hand-maintained project tag — is read back and rewritten on every push, so a
-sync never erases it. Nothing from QuickBooks lands on the `test_current`
+sync never erases it. This only applies to the version the Web App is
+deployed at: after changing `doPost`, use Deploy → Manage deployments → edit →
+Version: New version (not "New deployment", which makes a new URL the agent
+does not post to). A push with no customers leaves the tab alone (v3.5), and a
+tag whose customer was renamed in QuickBooks is listed under QuickBooks → Show
+Last QuickBooks Sync, so it can be re-tagged under the new name. Opening the `/exec` URL
+shows `qbdCustomersTagged`, the number of tagged customers. Nothing from QuickBooks lands on the `test_current`
 grid directly; that only happens when someone clicks **Refresh Hours**,
 which reads those staging sheets.
 

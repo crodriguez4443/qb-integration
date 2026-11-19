@@ -15,6 +15,13 @@
  * (CG) are manually maintained and are only referenced, never overwritten.
  *
  * ---------------------------------------------------------------------------
+ * v3.5 - Project tags ("QBD Customers" column D) are safer across syncs. A
+ * push with no customers (the agent's Customer step failed) no longer clears
+ * the tab, which had erased every tag for good. The push reply lists tags it
+ * could not carry because the customer's name changed in QuickBooks, and
+ * doGet reports how many customers are tagged. doPost changed, so the Web App
+ * needs a new version: Deploy > Manage deployments > edit > New version.
+ *
  * v3.4 - the cost rollup no longer charges one project with another's
  * invoices. Two causes, both in how an invoice found its project:
  *
@@ -102,7 +109,7 @@
 // the editor - a question that cost real time, because Apps Script Web App
 // deployments are pinned to a saved version and editing + Ctrl+S does not
 // change what the /exec URL serves. Bump this whenever this file changes.
-var SCRIPT_VERSION = '3.4';
+var SCRIPT_VERSION = '3.5';
 
 var SOURCE_SHEET = 'test_current';
 
@@ -316,6 +323,25 @@ function showLastSync() {
       (newest ? ', newest dated ' + newest : '') + '\n';
   }
 
+  // Set by doPost: what happened to the column D tags on the last push.
+  var tags = '';
+  var saved = PropertiesService.getScriptProperties().getProperty('QBD_LAST_TAGS');
+  if (saved) {
+    try {
+      var t = JSON.parse(saved);
+      tags = '\nProject tags (column D): ' + Object.keys(readCustomerProjects_(ss)).length +
+        ' customers tagged now; ' + t.carried + ' carried over on the last sync' +
+        (t.skipped ? ' (that sync sent no customers, so the tab was left as it was)' : '') + '.\n';
+      if (t.dropped && t.dropped.length) {
+        tags += t.droppedCount + ' tag(s) could not be carried over, because the customer is no ' +
+          'longer in QuickBooks under that name. Re-tag the new name:\n- ' +
+          t.dropped.join('\n- ') +
+          (t.droppedCount > t.dropped.length ? '\n- ...and ' + (t.droppedCount - t.dropped.length) + ' more' : '') +
+          '\n';
+      }
+    } catch (err) { /* older or damaged value: show the rest anyway */ }
+  }
+
   ui.alert('QuickBooks Desktop\n\n' +
     'Last data received from the local agent: ' +
     Utilities.formatDate(new Date(last), ss.getSpreadsheetTimeZone(), 'yyyy-MM-dd HH:mm') +
@@ -323,7 +349,8 @@ function showLastSync() {
     rows_(QBD_CUSTOMERS_SHEET, '') +
     rows_(QBD_PEOPLE_SHEET, '') +
     rows_(QBD_TIME_SHEET, newest_(QBD_TIME_SHEET, 2)) +
-    rows_(QBD_INVOICES_SHEET, newest_(QBD_INVOICES_SHEET, 3)));
+    rows_(QBD_INVOICES_SHEET, newest_(QBD_INVOICES_SHEET, 3)) +
+    tags);
 }
 
 // ---------------------------------------------------------------------------
@@ -471,6 +498,7 @@ function doGet(e) {
     out.spreadsheet = found.ss.getName();
     out.rows = {
       qbdCustomers: dataRows_(found.ss, QBD_CUSTOMERS_SHEET),
+      qbdCustomersTagged: Object.keys(readCustomerProjects_(found.ss)).length,
       qbdPeople: dataRows_(found.ss, QBD_PEOPLE_SHEET),
       qbdTime: dataRows_(found.ss, QBD_TIME_SHEET),
       qbdInvoices: dataRows_(found.ss, QBD_INVOICES_SHEET)
@@ -535,16 +563,31 @@ function doPost(e) {
     // existing tags first and write them back, or every sync would silently
     // erase them and the next Refresh Hours would report zero hours everywhere
     // with nothing to indicate why.
-    var priorProjects = readCustomerProjects_(ss);
-    var carried = 0;
-    writeQbdSheet_(ss, QBD_CUSTOMERS_SHEET,
-      ['Id', 'DisplayName', 'FullyQualifiedName', 'Project'],
-      customers.map(function (c) {
+    //
+    // An empty customer list is never real (there are ~1,800). It means the
+    // agent's Customer step failed - the agent still advances and pushes [] -
+    // and writing it would clear the tab, leaving no tags to carry next time.
+    // Keep the tab as it is instead, the same way invoices are handled below.
+    var carried = 0, dropped = [];
+    if (customers.length) {
+      var priorNames = {};
+      var priorProjects = readCustomerProjects_(ss, priorNames);
+      var used = {};
+      var customerRows = customers.map(function (c) {
         var full = c.FullyQualifiedName || c.DisplayName || '';
-        var project = priorProjects[normalize_(full)] || '';
-        if (project) carried++;
+        var key = normalize_(full);
+        var project = priorProjects[key] || '';
+        if (project) { carried++; used[key] = true; }
         return [c.Id, c.DisplayName || '', full, project];
-      }));
+      });
+      // Tags whose customer is no longer in QuickBooks under that name
+      // (renamed, moved under another job, deleted). Reported, not kept.
+      Object.keys(priorProjects).forEach(function (k) {
+        if (!used[k]) dropped.push(priorNames[k] + ' -> ' + priorProjects[k]);
+      });
+      writeQbdSheet_(ss, QBD_CUSTOMERS_SHEET,
+        ['Id', 'DisplayName', 'FullyQualifiedName', 'Project'], customerRows);
+    }
 
     writeQbdSheet_(ss, QBD_PEOPLE_SHEET, ['Id', 'DisplayName', 'Type'],
       people.map(function (p) { return [p.Id, p.DisplayName || '', p.Type || '']; }));
@@ -573,14 +616,26 @@ function doPost(e) {
     }
 
     PropertiesService.getScriptProperties().setProperty('QBD_LAST_PUSH', new Date().toISOString());
+    // For Show Last QuickBooks Sync. Capped well under the 9 KB a property holds.
+    var droppedShown = [];
+    dropped.some(function (d) {
+      if (JSON.stringify(droppedShown).length + d.length > 6000 || droppedShown.length >= 30) return true;
+      droppedShown.push(d);
+    });
+    PropertiesService.getScriptProperties().setProperty('QBD_LAST_TAGS', JSON.stringify({
+      carried: carried, skipped: !customers.length,
+      droppedCount: dropped.length, dropped: droppedShown
+    }));
 
     return ContentService.createTextOutput(JSON.stringify({
       success: true,
       scriptVersion: SCRIPT_VERSION,
       spreadsheet: ss.getName(),
       spreadsheetResolvedBy: found.how,
-      customers: customers.length,
+      customers: customers.length || 'none sent - "QBD Customers" left as it was',
       projectTagsCarriedOver: carried,
+      projectTagsDropped: dropped.length,
+      projectTagsDroppedList: dropped.slice(0, 50),
       people: people.length,
       timeEntries: timeEntries.length,
       invoices: Array.isArray(invoices) ? invoices.length : 'not sent (agent older than v1.4)',
@@ -617,8 +672,9 @@ function doPost(e) {
  * spacing. Keyed by name rather than id on purpose - see buildQboIndexes_ on
  * why customer ids in this data cannot be trusted as keys.
  */
-function readCustomerProjects_(ss) {
+function readCustomerProjects_(ss, names) {
   var map = {};
+  names = names || {};   // optional out: normalized key -> name as written
   var sheet = ss.getSheetByName(QBD_CUSTOMERS_SHEET);
   if (!sheet) return map;
 
@@ -629,7 +685,10 @@ function readCustomerProjects_(ss) {
   rows.forEach(function (r) {
     var full = String(r[2] || r[1] || '').trim();
     var project = String(r[QBD_CUSTOMER_PROJECT_COL - 1] || '').trim();
-    if (full && project) map[normalize_(full)] = project;
+    if (full && project) {
+      map[normalize_(full)] = project;
+      names[normalize_(full)] = full;
+    }
   });
   return map;
 }
@@ -2122,9 +2181,29 @@ function customerLines_(d, max) {
   return lines;
 }
 
+/** "2026-01-30" -> "01/30/26". */
+function shortDate_(ymd) {
+  return ymd.slice(5, 7) + '/' + ymd.slice(8, 10) + '/' + ymd.slice(2, 4);
+}
+
+/**
+ * The note on a BX cell: a short billing summary and nothing else. Everything
+ * behind it - customers, hours, left-out invoices, tag warnings - is in the
+ * Refresh Hours alert and in QuickBooks > Explain Cost Rollup.
+ */
+function cellNote_(d) {
+  var n = d.invoiceCount;
+  return [
+    'Invoiced: ' + money_(d.invoiced) + ' (' +
+      (n ? n + ' invoice' + (n === 1 ? '' : 's') : 'no invoices') + ')',
+    'Invoice dates: ' + (n ? shortDate_(d.invFirst) + ' – ' + shortDate_(d.invLast) : 'none'),
+    'Not yet invoiced: ' + money_(d.unbilledDollars)
+  ].join('\n\n');
+}
+
 /**
  * Writes each project's total cost to date into column BX on its first row,
- * with the breakdown as a note on the cell so the number can always be traced.
+ * with a short billing summary as a note on the cell (see cellNote_).
  * A cell there holding a formula is left alone and reported, not overwritten.
  */
 function writeCostRollup_(sheet, layout, roll) {
@@ -2159,13 +2238,9 @@ function writeCostRollup_(sheet, layout, roll) {
     }
     var d = roll.projects[p.name];
     var amount = round2_(d.invoiced + d.unbilledDollars);
-    var byCustomer = customerLines_(d, 6);
     sheet.getRange(p.headerRow, COL_COST_ROLLUP)
       .setValue(amount)
-      .setNote(['Total cost to date, from QuickBooks - Refresh Hours ' + roll.today]
-        .concat(costLines_(d, roll))
-        .concat(byCustomer.length ? ['By QuickBooks customer:'].concat(byCustomer) : [])
-        .join('\n'));
+      .setNote(cellNote_(d));
 
     out.total += amount;
     out.invoiced += d.invoiced;
